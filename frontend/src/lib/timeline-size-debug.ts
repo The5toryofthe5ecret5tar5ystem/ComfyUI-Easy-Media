@@ -286,7 +286,9 @@ export function startTimelineSizeDebug(node: any, label: string): () => void {
           },
         })
       } catch (error) {
-        console.warn('[easyMedia] size index patch failed', key, error)
+        // `node.size` is a Vue reactive Proxy whose defineProperty trap can reject this;
+        // the frame sampler still catches the write, so stay quiet.
+        console.debug('[easyMedia] size index patch skipped', key, error)
       }
     }
   }
@@ -313,7 +315,7 @@ export function startTimelineSizeDebug(node: any, label: string): () => void {
       },
     })
   } catch (error) {
-    console.warn('[easyMedia] size accessor patch failed', error)
+    console.debug('[easyMedia] size accessor patch skipped', error)
   }
   patchSizeIndexes(node.size)
 
