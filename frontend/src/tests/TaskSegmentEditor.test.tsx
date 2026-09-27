@@ -1540,3 +1540,75 @@ describe('TaskSegmentEditor', () => {
       .toBe('__slot__:image')
   })
 })
+
+describe('TaskSegmentEditor markdown import', () => {
+  const markdown = [
+    '# Elevator — Long Take prompts',
+    '',
+    '## SEGMENT 1 of 2 · shot · 00:00\u201300:08 · images: headshot + character sheet',
+    '',
+    '```',
+    'first prompt',
+    '```',
+    '',
+    '## SEGMENT 2 of 2 · context · 00:08\u201300:16',
+    '',
+    '```',
+    'second prompt',
+    '```',
+  ].join('\n')
+
+  function selectMarkdownFile(container: HTMLElement) {
+    const input = container.querySelector('input[type="file"]') as HTMLInputElement
+    expect(input).not.toBeNull()
+    const file = new File([markdown], 'take.md', { type: 'text/markdown' })
+    Object.defineProperty(input, 'files', { value: [file], configurable: true })
+    fireEvent.change(input)
+  }
+
+  function renderEditor(onTrackSegmentsChange: (segments: MultiTrackSegment[]) => void) {
+    return render(
+      <TaskSegmentEditor
+        segment={taskSegment()}
+        trackSegments={[taskSegment()]}
+        totalFrames={10}
+        onContentChange={vi.fn()}
+        onTrackSegmentsChange={onTrackSegmentsChange}
+      />,
+    )
+  }
+
+  it('creates task segments with prompts, continuity and grid-legal lengths', async () => {
+    const onTrackSegmentsChange = vi.fn()
+    const template = taskSegment()
+    const { container } = renderEditor(onTrackSegmentsChange)
+
+    const importButton = screen.getByRole('button', { name: 'Import .md' }) as HTMLButtonElement
+    expect(importButton.disabled).toBe(false)
+
+    selectMarkdownFile(container)
+    await screen.findByText('Import long-take prompts')
+    fireEvent.click(screen.getByRole('button', { name: 'Replace segments' }))
+
+    const updated = onTrackSegmentsChange.mock.lastCall?.[0] as MultiTrackSegment[]
+    expect(updated).toHaveLength(2)
+    expect(updated.map((segment) => [segment.start_frame, segment.end_frame])).toEqual([[0, 192], [192, 384]])
+    expect(updated.map((segment) => segment.content.user_prompt)).toEqual(['first prompt', 'second prompt'])
+    expect(updated.map((segment) => segment.content.continuity_mode)).toEqual(['shot', 'context'])
+    expect(updated[0].content.images).toEqual(template.content.images)
+  })
+
+  it('appends the imported segments after the existing track', async () => {
+    const onTrackSegmentsChange = vi.fn()
+    const { container } = renderEditor(onTrackSegmentsChange)
+
+    selectMarkdownFile(container)
+    await screen.findByText('Import long-take prompts')
+    fireEvent.click(screen.getByRole('button', { name: 'Append' }))
+
+    const updated = onTrackSegmentsChange.mock.lastCall?.[0] as MultiTrackSegment[]
+    expect(updated[0].id).toBe('task-segment')
+    expect(updated).toHaveLength(3)
+    expect([updated[1].start_frame, updated[1].end_frame]).toEqual([3, 195])
+  })
+})

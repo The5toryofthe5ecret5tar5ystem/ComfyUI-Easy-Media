@@ -1,5 +1,5 @@
-import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
-import { CloudUpload, Eye, Pencil, Plus, RotateCcw, Share2, Trash2 } from 'lucide-react'
+import { type ChangeEvent, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
+import { CloudUpload, Eye, FileUp, Pencil, Plus, RotateCcw, Share2, Trash2 } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import {
   Dialog,
@@ -42,6 +42,13 @@ import {
   parseMultiTrackDurationTimecode,
   segmentDuration,
 } from '@/lib/multitrack-utils'
+import {
+  buildImportedTaskSegments,
+  describeImportPlan,
+  type MarkdownImportPlan,
+  parseLongTakeMarkdown,
+  readFileText,
+} from '@/lib/markdown-import'
 import { cn } from '@/lib/utils'
 import {
   createTaskImage,
@@ -246,6 +253,9 @@ export function TaskSegmentEditor({
   const [reselectImageId, setReselectImageId] = useState<string | null>(null)
   const [isImageDragOver, setIsImageDragOver] = useState(false)
   const [applyPromptToAllOpen, setApplyPromptToAllOpen] = useState(false)
+  const [markdownImport, setMarkdownImport] = useState<{ fileName: string; plan: MarkdownImportPlan } | null>(null)
+  const [markdownImportError, setMarkdownImportError] = useState<string | null>(null)
+  const markdownInputRef = useRef<HTMLInputElement | null>(null)
   const [systemPromptOptions, setSystemPromptOptions] = useState<SystemPromptOption[] | null>(cachedSystemPromptOptions ?? null)
   const [systemPromptLoading, setSystemPromptLoading] = useState(false)
   const [isDurationEditing, setIsDurationEditing] = useState(false)
@@ -495,6 +505,39 @@ export function TaskSegmentEditor({
     }
     setReselectImageId(null)
     setMediaSelectorOpen(false)
+  }
+
+  async function handleMarkdownFile(file: File) {
+    try {
+      const text = await readFileText(file)
+      const plan = parseLongTakeMarkdown(text, { frameRate })
+      if (plan.segments.length === 0) {
+        setMarkdownImportError(t('multitrack.importMarkdownEmpty'))
+        return
+      }
+      setMarkdownImport({ fileName: file.name, plan })
+    } catch {
+      setMarkdownImportError(t('multitrack.importMarkdownFailed'))
+    }
+  }
+
+  async function handleMarkdownInputChange(event: ChangeEvent<HTMLInputElement>) {
+    const file = event.currentTarget.files?.[0]
+    event.currentTarget.value = ''
+    if (file) await handleMarkdownFile(file)
+  }
+
+  function commitMarkdownImport(mode: 'replace' | 'append') {
+    if (!markdownImport || !onTrackSegmentsChange) return
+    const trackEndFrame = editableSegments.reduce((max, item) => Math.max(max, item.end_frame), 0)
+    onTrackSegmentsChange(buildImportedTaskSegments(markdownImport.plan, {
+      existing: editableSegments,
+      color: segment.color,
+      frameRate,
+      totalFrames: totalFrames ?? trackEndFrame,
+      mode,
+    }))
+    setMarkdownImport(null)
   }
 
   function commitCombinedPrompt(value: string) {
@@ -1176,12 +1219,41 @@ export function TaskSegmentEditor({
       </div>
 
       <div className="relative flex shrink-0 items-center justify-between border-t border-dashed border-border p-2">
-        <Tabs value={editMode} onValueChange={(value) => setEditMode(value as EditMode)} className={showEditModeToggle ? undefined : 'hidden'}>
-          <TabsList className="h-8 bg-card">
-            <TabsTrigger value="individual" className="text-[10px]">{t('multitrack.individualEdit')}</TabsTrigger>
-            <TabsTrigger value="combined" className="text-[10px]">{t('multitrack.combinedEdit')}</TabsTrigger>
-          </TabsList>
-        </Tabs>
+        <div className="flex items-center gap-1">
+          <Tabs value={editMode} onValueChange={(value) => setEditMode(value as EditMode)} className={showEditModeToggle ? undefined : 'hidden'}>
+            <TabsList className="h-8 bg-card">
+              <TabsTrigger value="individual" className="text-[10px]">{t('multitrack.individualEdit')}</TabsTrigger>
+              <TabsTrigger value="combined" className="text-[10px]">{t('multitrack.combinedEdit')}</TabsTrigger>
+            </TabsList>
+          </Tabs>
+          <TooltipProvider delayDuration={300}>
+            <Tooltip>
+              <TooltipTrigger asChild>
+                <Button
+                  type="button"
+                  variant="ghost"
+                  size="icon"
+                  className="h-8 w-8 cursor-pointer"
+                  disabled={!onTrackSegmentsChange}
+                  aria-label={t('multitrack.importMarkdown')}
+                  onClick={() => markdownInputRef.current?.click()}
+                >
+                  <FileUp className="h-4 w-4" />
+                </Button>
+              </TooltipTrigger>
+              <TooltipContent side="bottom" className="max-w-72">
+                {t('multitrack.importMarkdownTooltip')}
+              </TooltipContent>
+            </Tooltip>
+          </TooltipProvider>
+          <input
+            ref={markdownInputRef}
+            type="file"
+            accept=".md,.markdown,.txt,text/markdown,text/plain"
+            className="hidden"
+            onChange={handleMarkdownInputChange}
+          />
+        </div>
 
         <div className={cn(
           showEditModeToggle ? 'absolute left-1/2 -translate-x-1/2' : 'flex items-center',
@@ -1320,6 +1392,52 @@ export function TaskSegmentEditor({
             </Button>
             <Button type="button" onClick={handleApplyPromptToAll}>
               {t('multitrack.applyPromptToAllConfirm')}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+      <Dialog open={markdownImport !== null} onOpenChange={(open) => { if (!open) setMarkdownImport(null) }}>
+        <DialogContent className="max-w-md">
+          <DialogHeader>
+            <DialogTitle>{t('multitrack.importMarkdownTitle')}</DialogTitle>
+            <DialogDescription>
+              {t('multitrack.importMarkdownDescription', {
+                file: markdownImport?.fileName ?? '',
+                summary: markdownImport ? describeImportPlan(markdownImport.plan) : '',
+              })}
+            </DialogDescription>
+          </DialogHeader>
+          {markdownImport && markdownImport.plan.warnings.length > 0 && (
+            <ul className="max-h-40 list-disc space-y-1 overflow-auto pl-4 text-[11px] text-muted-foreground">
+              {markdownImport.plan.warnings.slice(0, 8).map((warning) => (
+                <li key={warning}>{warning}</li>
+              ))}
+            </ul>
+          )}
+          <DialogFooter>
+            <Button type="button" variant="outline" onClick={() => setMarkdownImport(null)}>
+              {t('common.cancel')}
+            </Button>
+            {markdownImport && editableSegments.length > 0 && (
+              <Button type="button" variant="secondary" onClick={() => commitMarkdownImport('append')}>
+                {t('multitrack.importMarkdownAppend')}
+              </Button>
+            )}
+            <Button type="button" onClick={() => commitMarkdownImport('replace')}>
+              {t('multitrack.importMarkdownReplace')}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+      <Dialog open={markdownImportError !== null} onOpenChange={(open) => { if (!open) setMarkdownImportError(null) }}>
+        <DialogContent className="max-w-md">
+          <DialogHeader>
+            <DialogTitle>{t('multitrack.importMarkdownFailedTitle')}</DialogTitle>
+            <DialogDescription>{markdownImportError}</DialogDescription>
+          </DialogHeader>
+          <DialogFooter>
+            <Button type="button" onClick={() => setMarkdownImportError(null)}>
+              {t('common.cancel')}
             </Button>
           </DialogFooter>
         </DialogContent>
