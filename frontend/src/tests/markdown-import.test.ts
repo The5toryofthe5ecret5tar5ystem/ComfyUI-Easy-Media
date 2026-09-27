@@ -1,10 +1,13 @@
 import { describe, expect, it } from 'vitest'
 import {
+  buildImportedProject,
   buildImportedTaskSegments,
   describeImportPlan,
   isH3FrameCount,
   MARKDOWN_IMPORT_MAX_SEGMENTS,
+  MEGAPIXEL_RESOLUTION_LABEL,
   parseLongTakeMarkdown,
+  parseProjectSettings,
   parseTimecodeSeconds,
   planToCombinedText,
   snapH3Frames,
@@ -15,6 +18,15 @@ const EN_DASH = '\u2013'
 
 function guideFile(segments: Array<{ mode?: string; start: string; end: string; images?: string; body?: string }>): string {
   const total = segments.length
+  const first = segments[0]
+  const length = first ? parseTimecodeSeconds(first.end) !== null && parseTimecodeSeconds(first.start) !== null
+    ? Number(parseTimecodeSeconds(first.end)) - Number(parseTimecodeSeconds(first.start))
+    : 8 : 8
+  const preamble = [
+    `Setup: ${total} segments of ${length} s, resolution 1.2 MP, 16:9. Task mode \`ref\` everywhere;`,
+    `continuity \`shot\` on segment 1 and \`context\` on 2-${total}. \`ref_image_size = max\`.`,
+    'Refs on segment 1 only, shared. `segment_start_number = 1`, `sampling_mode = single`.',
+  ].join(' ')
   const sections = segments.map((segment, index) => {
     const parts = [`SEGMENT ${index + 1} of ${total}`, segment.mode, `${segment.start}${EN_DASH}${segment.end}`]
     if (segment.images) parts.push(`images: ${segment.images}`)
@@ -27,7 +39,7 @@ function guideFile(segments: Array<{ mode?: string; start: string; end: string; 
       '',
     ].join('\n')
   })
-  return ['# Elevator — Long Take prompts', '', 'Setup: 12 segments of 8 s, resolution 1.2 MP, 16:9.', '', '---', '', '# The prompts', '', ...sections].join('\n')
+  return ['# Elevator — Long Take prompts', '', preamble, '', '---', '', '# The prompts', '', ...sections].join('\n')
 }
 
 function taskSegment(overrides: Partial<MultiTrackSegment['content']> = {}): MultiTrackSegment {
@@ -115,7 +127,10 @@ describe('parseLongTakeMarkdown', () => {
     expect(plan.segments).toHaveLength(12)
     expect(plan.totalFrames).toBe(2304)
     expect(plan.uniformDurationSeconds).toBe(8)
-    expect(describeImportPlan(plan)).toBe('12 segments · 8.00s each')
+    expect(plan.settings.megapixels).toBe(1.2)
+    expect(plan.settings.aspectRatio).toBe('16:9 (Widescreen)')
+    expect(plan.settings.taskMode).toBe('ref')
+    expect(describeImportPlan(plan)).toBe('12 segments · 8.00s each · 1.2 MP 16:9 (Widescreen) · ref')
   })
 
   it('does not confuse context_swap with context', () => {
@@ -213,6 +228,143 @@ describe('parseLongTakeMarkdown', () => {
       { mode: 'context', start: '00:08', end: '00:16', body: 'prompt two' },
     ]))
     expect(planToCombinedText(plan)).toBe('prompt one|prompt two')
+  })
+})
+
+describe('parseProjectSettings', () => {
+  it('reads resolution, fps, generator mode and reference sizing from the setup block', () => {
+    const settings = parseProjectSettings([
+      'Setup: 24 segments of 12.25 s, resolution 0.9 MP, 21:9. 24 fps.',
+      'Task mode `ref2v` everywhere; continuity `shot` on segment 1 and `context` on 2-24.',
+      '`ref_image_size = max`. `segment_start_number = 1`, `sampling_mode = single`.',
+      '',
+      '## SEGMENT 1 of 24 · shot · 00:00-00:12',
+    ].join('\n'))
+
+    expect(settings.megapixels).toBe(0.9)
+    expect(settings.aspectRatio).toBe('21:9 (Ultrawide)')
+    expect(settings.frameRate).toBe(24)
+    expect(settings.taskMode).toBe('ref')
+    expect(settings.refImageSize).toBe('max')
+    expect(settings.plannedSegmentCount).toBe(24)
+    expect(settings.plannedSegmentSeconds).toBe(12.25)
+    expect(settings.continuity).toBe('shot')
+    expect(settings.notes.some((note) => note.includes('segment_start_number = 1'))).toBe(true)
+    expect(settings.notes.some((note) => note.includes('sampling_mode = single'))).toBe(true)
+  })
+
+  it('maps generator wording onto task modes', () => {
+    expect(parseProjectSettings('Task mode i2v').taskMode).toBe('l2v')
+    expect(parseProjectSettings('generator v2v').taskMode).toBe('edit')
+    expect(parseProjectSettings('Task mode edit').taskMode).toBe('edit')
+    expect(parseProjectSettings('r2v').taskMode).toBe('ref')
+  })
+
+  it('warns instead of applying an out-of-range resolution', () => {
+    const settings = parseProjectSettings('resolution 32 MP, 16:9')
+    expect(settings.megapixels).toBeUndefined()
+    expect(settings.notes.some((note) => note.includes('was ignored'))).toBe(true)
+  })
+
+  it('does not mistake a timecode for an aspect ratio', () => {
+    expect(parseProjectSettings('SEGMENT 1 · 00:08-00:16').aspectRatio).toBeUndefined()
+  })
+
+  it('uses the fps from the file as the plan frame rate', () => {
+    const plan = parseLongTakeMarkdown([
+      'Setup: 2 segments of 5 s, 30 fps.',
+      '',
+      '```',
+      'first',
+      '```',
+      '',
+      '```',
+      'second',
+      '```',
+    ].join('\n'))
+    expect(plan.frameRate).toBe(30)
+    expect(plan.segments).toHaveLength(2)
+    // 5 s at 30 fps is 150 frames, snapped to the nearest 17k+5 value (158).
+    const project = buildImportedProject(plan)
+    expect(project.frame_rate).toBe(30)
+    expect(project.tracks[0].segments.map((segment) => segment.end_frame - segment.start_frame))
+      .toEqual([158, 158])
+  })
+})
+
+describe('buildImportedProject', () => {
+  it('builds a task track from an empty project', () => {
+    const plan = parseLongTakeMarkdown(guideFile([
+      { mode: 'shot', start: '00:00', end: '00:08', body: 'prompt one' },
+      { mode: 'context', start: '00:08', end: '00:16', body: 'prompt two' },
+    ]))
+    const project = buildImportedProject(plan)
+
+    expect(project.tracks).toHaveLength(1)
+    expect(project.tracks[0].type).toBe('task')
+    expect(project.tracks[0].task_mode).toBe('ref')
+    expect(project.total_length).toBe(384)
+    expect(project.frame_rate).toBe(24)
+    expect(project.tracks[0].segments.map((segment) => [segment.start_frame, segment.end_frame]))
+      .toEqual([[0, 192], [192, 384]])
+
+    const [first, second] = project.tracks[0].segments
+    expect(first.content).toMatchObject({
+      media_type: 'none',
+      task_mode: 'ref',
+      continuity_mode: 'shot',
+      ref_image_size: 'max',
+      user_prompt: 'prompt one',
+      images: [],
+    })
+    expect(second.content.continuity_mode).toBe('context')
+    expect(second.content.user_prompt).toBe('prompt two')
+  })
+
+  it('honours a per-segment generator mode', () => {
+    const plan = parseLongTakeMarkdown([
+      'Setup: 2 segments of 8 s, resolution 1 MP, 16:9. Task mode `ref`.',
+      '',
+      '## SEGMENT 1 of 2 · shot · task: ref2v · 00:00-00:08',
+      '',
+      '```',
+      'first',
+      '```',
+      '',
+      '## SEGMENT 2 of 2 · context · task: i2v · 00:08-00:16',
+      '',
+      '```',
+      'second',
+      '```',
+    ].join('\n'))
+
+    const project = buildImportedProject(plan)
+    expect(project.tracks[0].segments.map((segment) => segment.content.task_mode)).toEqual(['ref', 'l2v'])
+  })
+
+  it('falls back to the setup length when headings carry no time ranges', () => {
+    const plan = parseLongTakeMarkdown([
+      'Setup: 2 segments of 6 s. Task mode `ref`.',
+      '',
+      '```',
+      'first',
+      '```',
+      '',
+      '```',
+      'second',
+      '```',
+    ].join('\n'))
+
+    expect(plan.totalFrames).toBe(0)
+    const project = buildImportedProject(plan)
+    // 6 s at 24 fps is 144 frames, snapped to the nearest 17k+5 value (141).
+    expect(project.tracks[0].segments.map((segment) => segment.end_frame - segment.start_frame))
+      .toEqual([141, 141])
+    expect(project.total_length).toBe(282)
+  })
+
+  it('switches the resolution label it expects the editor to use', () => {
+    expect(MEGAPIXEL_RESOLUTION_LABEL).toBe('width x height (megapixels)')
   })
 })
 

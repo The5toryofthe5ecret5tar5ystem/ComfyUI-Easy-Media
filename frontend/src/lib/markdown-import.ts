@@ -1,10 +1,19 @@
-import type { MultiTrackContinuityMode, MultiTrackSegment } from '@/types/multitrack'
+import type {
+  MultiTrack,
+  MultiTrackContinuityMode,
+  MultiTrackRefImageSize,
+  MultiTrackSegment,
+  MultiTrackTaskMode,
+  TrackData,
+} from '@/types/multitrack'
 import { uuid } from './uuid'
 import {
   getInheritedTaskSegmentContent,
   getSelectedTaskUserPromptPatch,
   MULTITRACK_DEFAULT_FRAME_RATE,
   MULTITRACK_DEFAULT_TASK_MODE,
+  MULTITRACK_DEFAULT_VOLUME_DB,
+  MULTITRACK_TRACK_COLORS,
   snapSecondsToFrame,
 } from './multitrack-utils'
 
@@ -33,6 +42,61 @@ export const H3_MAX_TESTED_FRAMES = 362
 /** Guard rail: refuse absurd files rather than building a thousand segments. */
 export const MARKDOWN_IMPORT_MAX_SEGMENTS = 120
 
+/** Editor resolution label that switches the project to megapixel sizing. */
+export const MEGAPIXEL_RESOLUTION_LABEL = 'width x height (megapixels)'
+/** The megapixels combo accepts 0.1 - 16.0. */
+export const MIN_MEGAPIXELS = 0.1
+export const MAX_MEGAPIXELS = 16
+
+/** Aspect ratio labels exactly as the editor resolution combo spells them. */
+export const ASPECT_RATIO_LABELS: Record<string, string> = {
+  '1:1': '1:1 (Square)',
+  '2:3': '2:3 (Portrait Photo)',
+  '3:2': '3:2 (Photo)',
+  '3:4': '3:4 (Portrait Standard)',
+  '4:3': '4:3 (Standard)',
+  '9:16': '9:16 (Portrait Widescreen)',
+  '16:9': '16:9 (Widescreen)',
+  '21:9': '21:9 (Ultrawide)',
+}
+
+/** Generator wording people (and the prompt writer) use, mapped onto task modes. */
+export const TASK_MODE_ALIASES: Record<string, MultiTrackTaskMode> = {
+  t2v: 'default',
+  t2i: 'default',
+  default: 'default',
+  i2v: 'l2v',
+  l2v: 'l2v',
+  fl2v: 'l2v',
+  flf2v: 'l2v',
+  r2v: 'ref',
+  r2va: 'ref',
+  ref: 'ref',
+  ref2v: 'ref',
+  ref2va: 'ref',
+  v2v: 'edit',
+  edit: 'edit',
+  rv2v: 'edit',
+}
+
+export interface MarkdownProjectSettings {
+  /** Total segments the file plans for, when it says so. */
+  plannedSegmentCount?: number
+  /** Uniform segment length in seconds, when the file says so. */
+  plannedSegmentSeconds?: number
+  megapixels?: number
+  /** Editor aspect ratio label, e.g. `16:9 (Widescreen)`. */
+  aspectRatio?: string
+  frameRate?: number
+  /** Task mode applied to segments that do not name one. */
+  taskMode?: MultiTrackTaskMode
+  /** Continuity applied to every segment after the first. */
+  continuity?: MultiTrackContinuityMode
+  refImageSize?: MultiTrackRefImageSize
+  /** Values the editor does not own; reported for the confirmation dialog. */
+  notes: string[]
+}
+
 export type MarkdownImportSource = 'headings' | 'fences' | 'dividers' | 'document'
 
 export interface ImportedMarkdownSegment {
@@ -42,6 +106,8 @@ export interface ImportedMarkdownSegment {
   label: string
   prompt: string
   continuity?: MultiTrackContinuityMode
+  /** Task mode named in this segment's heading, if any. */
+  taskMode?: MultiTrackTaskMode
   startSeconds?: number
   endSeconds?: number
   durationSeconds?: number
@@ -59,6 +125,8 @@ export interface MarkdownImportPlan {
   totalFrames: number
   /** Duration applied to segments whose heading carried no time range. */
   uniformDurationSeconds?: number
+  /** Project-wide settings read from the file's setup preamble. */
+  settings: MarkdownProjectSettings
 }
 
 export interface BuildImportedTaskSegmentsOptions {
@@ -137,6 +205,88 @@ function detectImagesHint(meta: string): string | undefined {
   return hint ? hint : undefined
 }
 
+/** `ref`, `ref2v`, `i2v`, `v2v` … - read from the segment heading or the setup line. */
+function detectTaskMode(value: string): MultiTrackTaskMode | undefined {
+  const explicit = /(?:task[\s_]?mode|task|mode)\s*[:=]?\s*[`'"]?([a-z0-9_]+)/i.exec(value)
+  if (explicit) {
+    const mapped = TASK_MODE_ALIASES[explicit[1].toLowerCase()]
+    if (mapped) return mapped
+  }
+  // Bare tokens only for wording that cannot be prose; `edit`/`default` need a prefix.
+  const bare = /\b(t2v|t2i|i2v|fl2v|flf2v|l2v|r2v|r2va|ref2v|ref2va|ref|v2v|rv2v)\b/i.exec(value)
+  return bare ? TASK_MODE_ALIASES[bare[1].toLowerCase()] : undefined
+}
+
+/** Everything before the first segment heading is the author's setup block. */
+function projectPreamble(text: string): string {
+  const lines: string[] = []
+  for (const line of text.split(/\r?\n/)) {
+    if (SEGMENT_HEADING_RE.test(line)) break
+    lines.push(line)
+  }
+  return lines.join('\n')
+}
+
+/**
+ * Read the project-wide setup the prompt writer puts above the segments, e.g.
+ *
+ *   Setup: 12 segments of 8 s, resolution 1.2 MP, 16:9. Task mode `ref`
+ *   everywhere; continuity `shot` on segment 1 and `context` on 2-12.
+ *   `ref_image_size = max`. `sampling_mode = single`.
+ */
+export function parseProjectSettings(text: string): MarkdownProjectSettings {
+  const preamble = projectPreamble(text)
+  const notes: string[] = []
+  const settings: MarkdownProjectSettings = { notes }
+
+  const megapixels = /(\d+(?:\.\d+)?)\s*(?:mp|megapixels?)\b/i.exec(preamble)
+  if (megapixels) {
+    const value = Number(megapixels[1])
+    if (Number.isFinite(value) && value >= MIN_MEGAPIXELS && value <= MAX_MEGAPIXELS) {
+      settings.megapixels = value
+    } else {
+      notes.push(
+        `Resolution ${megapixels[0].trim()} is outside the editor's ${MIN_MEGAPIXELS}-${MAX_MEGAPIXELS} MP range and was ignored.`,
+      )
+    }
+  }
+
+  const aspect = /(?<![\d:])(1:1|2:3|3:2|3:4|4:3|9:16|16:9|21:9)(?![\d:])/.exec(preamble)
+  if (aspect) settings.aspectRatio = ASPECT_RATIO_LABELS[aspect[1]]
+
+  const frameRate = /\b(\d{1,3})\s*fps\b/i.exec(preamble)
+  if (frameRate) {
+    const value = Number(frameRate[1])
+    if (value >= 1 && value <= 240) settings.frameRate = value
+  }
+
+  const count = /\b(\d{1,3})\s*segments?\b/i.exec(preamble)
+  if (count) settings.plannedSegmentCount = Number(count[1])
+
+  const seconds = /\bsegments?\s+of\s+(\d+(?:\.\d+)?)\s*s\b/i.exec(preamble)
+    ?? /\b(\d+(?:\.\d+)?)\s*(?:s|sec(?:onds?)?)\s*(?:each|per segment)\b/i.exec(preamble)
+  if (seconds) {
+    const value = Number(seconds[1])
+    if (value > 0) settings.plannedSegmentSeconds = value
+  }
+
+  const taskMode = detectTaskMode(preamble)
+  if (taskMode) settings.taskMode = taskMode
+
+  const continuity = /continuity\s*[`'"]?(shot|context_swap|context)/i.exec(preamble)
+  if (continuity) settings.continuity = continuity[1].toLowerCase() as MultiTrackContinuityMode
+
+  const refImageSize = /ref_image_size\s*[`'"]*\s*[=:]?\s*[`'"]?(match|max)/i.exec(preamble)
+  if (refImageSize) settings.refImageSize = refImageSize[1].toLowerCase() as MultiTrackRefImageSize
+
+  const startNumber = /segment_start_number\s*[`'"]*\s*[=:]?\s*(\d+)/i.exec(preamble)
+  if (startNumber) notes.push(`segment_start_number = ${startNumber[1]} (a multitrack project setting).`)
+  const samplingMode = /sampling_mode\s*[`'"]*\s*[=:]?\s*[`'"]?(\w+)/i.exec(preamble)
+  if (samplingMode) notes.push(`sampling_mode = ${samplingMode[1]} (a multitrack project setting).`)
+
+  return settings
+}
+
 function extractPrompt(block: RawBlock): string {
   const text = block.lines.join('\n')
   const fenced = FENCED_BLOCK_RE.exec(text)
@@ -206,6 +356,7 @@ function takePrompts(text: string): Pick<MarkdownImportPlan, 'segments' | 'sourc
         label: block.label,
         prompt,
         continuity,
+        taskMode: detectTaskMode(block.meta || block.label),
         startSeconds: range.startSeconds,
         endSeconds: range.endSeconds,
         imagesHint: detectImagesHint(block.meta || block.label),
@@ -290,7 +441,10 @@ function resolveDurations(segments: ImportedMarkdownSegment[], frameRate: number
 }
 
 export function parseLongTakeMarkdown(text: string, options: { frameRate?: number } = {}): MarkdownImportPlan {
-  const frameRate = options.frameRate && options.frameRate > 0 ? options.frameRate : MULTITRACK_DEFAULT_FRAME_RATE
+  const settings = parseProjectSettings(text)
+  const frameRate = options.frameRate && options.frameRate > 0
+    ? options.frameRate
+    : settings.frameRate ?? MULTITRACK_DEFAULT_FRAME_RATE
   const { segments, source, warnings } = takePrompts(text)
 
   if (segments.length > MARKDOWN_IMPORT_MAX_SEGMENTS) {
@@ -313,7 +467,13 @@ export function parseLongTakeMarkdown(text: string, options: { frameRate?: numbe
     ? segments[0]?.durationSeconds
     : undefined
 
-  return { source, frameRate, segments, warnings, totalFrames, uniformDurationSeconds }
+  if (settings.plannedSegmentCount !== undefined && settings.plannedSegmentCount !== segments.length) {
+    warnings.push(
+      `The setup block says ${settings.plannedSegmentCount} segments but ${segments.length} were found; the found segments win.`,
+    )
+  }
+
+  return { source, frameRate, segments, warnings, totalFrames, uniformDurationSeconds, settings }
 }
 
 /** The same plan as a Combined-editor paste string. */
@@ -404,6 +564,82 @@ export function buildImportedTaskSegments(
   return mode === 'append' ? [...ordered, ...built] : built
 }
 
+export interface BuildImportedProjectOptions {
+  frameRate?: number
+  /** Fallback segment length when neither the headings nor the setup block give one. */
+  fallbackSegmentSeconds?: number
+}
+
+/**
+ * Build a complete track project from an imported file: one task track whose
+ * segments carry the file's prompts, generator mode, continuity and lengths.
+ *
+ * Everything the editor owns is replaced, so this works with an empty project.
+ */
+export function buildImportedProject(
+  plan: MarkdownImportPlan,
+  options: BuildImportedProjectOptions = {},
+): TrackData {
+  const frameRate = options.frameRate ?? plan.frameRate ?? MULTITRACK_DEFAULT_FRAME_RATE
+  const { settings } = plan
+  const fallbackSeconds = options.fallbackSegmentSeconds ?? settings.plannedSegmentSeconds ?? 8
+  const lengths = plan.totalFrames > 0
+    ? plan.segments.map((segment) => segment.frames ?? 0)
+    : distributeFrames(plan.segments, Math.round(fallbackSeconds * frameRate) * plan.segments.length, frameRate)
+
+  const segments: MultiTrackSegment[] = []
+  let cursor = 0
+  plan.segments.forEach((segment, index) => {
+    const start = cursor
+    const end = start + Math.max(1, lengths[index] ?? 0)
+    cursor = end
+    const continuity = segment.continuity ?? (
+      index === 0
+        ? (settings.continuity && settings.continuity !== 'shot' ? settings.continuity : 'shot')
+        : settings.continuity ?? 'context'
+    )
+    segments.push({
+      id: uuid(),
+      start_frame: start,
+      end_frame: end,
+      color: MULTITRACK_TRACK_COLORS.task,
+      content: {
+        media_type: 'none',
+        task_mode: segment.taskMode ?? settings.taskMode ?? MULTITRACK_DEFAULT_TASK_MODE,
+        continuity_mode: continuity,
+        ...(settings.refImageSize ? { ref_image_size: settings.refImageSize } : {}),
+        images: [],
+        user_prompt: segment.prompt,
+        muted: false,
+        volume_db: MULTITRACK_DEFAULT_VOLUME_DB,
+      },
+    })
+  })
+
+  const taskTrack: MultiTrack = {
+    id: uuid(),
+    name: 'Task 0',
+    type: 'task',
+    task_mode: settings.taskMode ?? MULTITRACK_DEFAULT_TASK_MODE,
+    color: MULTITRACK_TRACK_COLORS.task,
+    muted: false,
+    solo: false,
+    volume_db: MULTITRACK_DEFAULT_VOLUME_DB,
+    locked: false,
+    segments,
+  }
+
+  return {
+    muted: false,
+    volume_db: MULTITRACK_DEFAULT_VOLUME_DB,
+    task_markers: [],
+    task_overview: false,
+    tracks: [taskTrack],
+    total_length: cursor,
+    frame_rate: frameRate,
+  }
+}
+
 /** Human summary for the confirmation dialog. */
 export function describeImportPlan(plan: MarkdownImportPlan): string {
   const count = plan.segments.length
@@ -413,5 +649,12 @@ export function describeImportPlan(plan: MarkdownImportPlan): string {
   const seconds = uniform && lengths[0] !== undefined
     ? `${(lengths[0] / plan.frameRate).toFixed(2)}s each`
     : `${(plan.totalFrames / plan.frameRate).toFixed(1)}s total`
-  return `${count} segment${count === 1 ? '' : 's'} · ${seconds}`
+  const resolution = plan.settings.megapixels !== undefined
+    ? ` · ${plan.settings.megapixels} MP${plan.settings.aspectRatio ? ` ${plan.settings.aspectRatio}` : ''}`
+    : ''
+  const modes = [...new Set(plan.segments
+    .map((segment) => segment.taskMode ?? plan.settings.taskMode)
+    .filter((mode): mode is NonNullable<typeof mode> => mode !== undefined))]
+  const generator = modes.length > 0 ? ` · ${modes.join('/')}` : ''
+  return `${count} segment${count === 1 ? '' : 's'} · ${seconds}${resolution}${generator}`
 }

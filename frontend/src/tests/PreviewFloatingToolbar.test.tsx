@@ -12,6 +12,51 @@ describe('PreviewFloatingToolbar', () => {
     })
   })
 
+  it('offers markdown import above the audio and fps buttons', () => {
+    const onImportMarkdown = vi.fn()
+    render(
+      <PreviewFloatingToolbar
+        globalMuted={false}
+        globalVolumeDb={0}
+        frameRate={24}
+        selectedMediaVolumeDb={null}
+        selectedMediaMuted={false}
+        selectedMediaDuration={null}
+        onImportMarkdown={onImportMarkdown}
+        onGlobalSettingsChange={vi.fn()}
+        onSelectedSegmentContentChange={vi.fn()}
+        onSelectedSegmentDurationChange={vi.fn()}
+      />,
+    )
+
+    const importButton = screen.getByRole('button', { name: 'Import .md' })
+    expect(importButton.textContent).toContain('Import MD')
+    const labels = screen.getAllByRole('button').map((button) => button.getAttribute('aria-label'))
+    expect(labels.indexOf('Import .md')).toBeLessThan(labels.indexOf('Audio settings'))
+    expect(labels.indexOf('Audio settings')).toBeLessThan(labels.indexOf('fps settings'))
+
+    fireEvent.click(importButton)
+    expect(onImportMarkdown).toHaveBeenCalledTimes(1)
+  })
+
+  it('hides markdown import when the editor cannot build a project', () => {
+    render(
+      <PreviewFloatingToolbar
+        globalMuted={false}
+        globalVolumeDb={0}
+        frameRate={24}
+        selectedMediaVolumeDb={null}
+        selectedMediaMuted={false}
+        selectedMediaDuration={null}
+        onGlobalSettingsChange={vi.fn()}
+        onSelectedSegmentContentChange={vi.fn()}
+        onSelectedSegmentDurationChange={vi.fn()}
+      />,
+    )
+
+    expect(screen.queryByRole('button', { name: 'Import .md' })).toBeNull()
+  })
+
   it('updates global audio settings when no video segment is selected', () => {
     const onGlobalSettingsChange = vi.fn()
     render(

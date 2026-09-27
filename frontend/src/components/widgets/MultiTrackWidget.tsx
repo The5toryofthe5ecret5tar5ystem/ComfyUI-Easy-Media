@@ -1,7 +1,23 @@
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { type ChangeEvent, useCallback, useEffect, useRef, useState } from 'react'
 import { Download, ExternalLink, Loader2, X } from 'lucide-react'
 import { Button } from '@/components/ui/button'
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from '@/components/ui/dialog'
 import { TooltipProvider } from '@/components/ui/tooltip'
+import {
+  buildImportedProject,
+  describeImportPlan,
+  type MarkdownImportPlan,
+  MEGAPIXEL_RESOLUTION_LABEL,
+  parseLongTakeMarkdown,
+  readFileText,
+} from '@/lib/markdown-import'
 import { useCanvasScale } from '@/hooks/use-canvas-scale'
 import { useElementWidth } from '@/hooks/use-element-width'
 import { useMultiTrackHistory } from '@/hooks/use-multitrack-history'
@@ -156,6 +172,9 @@ export function MultiTrackWidget({ value, onChange, app, node }: Readonly<ReactW
   const [missingModel, setMissingModel] = useState<MissingModelInfo | null>(null)
   const [isDownloadingModel, setIsDownloadingModel] = useState(false)
   const [modelDownloadError, setModelDownloadError] = useState<string | null>(null)
+  const [pendingImport, setPendingImport] = useState<{ fileName: string; plan: MarkdownImportPlan } | null>(null)
+  const [importNotice, setImportNotice] = useState<string | null>(null)
+  const importInputRef = useRef<HTMLInputElement | null>(null)
   const rafRef = useRef<number | null>(null)
   const timelineContainerRef = useRef<HTMLDivElement>(null)
   const startedAtRef = useRef(0)
@@ -208,6 +227,71 @@ export function MultiTrackWidget({ value, onChange, app, node }: Readonly<ReactW
 
   function commitNormalizedTrackChange(nextData: TrackData) {
     commitTrackChange(normalizeTrackData(nextData))
+  }
+
+  async function handleImportMarkdownFile(file: File) {
+    try {
+      const text = await readFileText(file)
+      const plan = parseLongTakeMarkdown(text, { frameRate: data.frame_rate })
+      if (plan.segments.length === 0) {
+        setImportNotice(t('multitrack.importMarkdownEmpty'))
+        return
+      }
+      setPendingImport({ fileName: file.name, plan })
+    } catch {
+      setImportNotice(t('multitrack.importMarkdownFailed'))
+    }
+  }
+
+  async function handleImportMarkdownInputChange(event: ChangeEvent<HTMLInputElement>) {
+    const file = event.currentTarget.files?.[0]
+    event.currentTarget.value = ''
+    if (file) await handleImportMarkdownFile(file)
+  }
+
+  function applyImportedProject() {
+    if (!pendingImport) return
+    commitNormalizedTrackChange(buildImportedProject(pendingImport.plan, { frameRate: data.frame_rate }))
+    applyImportedResolution(pendingImport.plan)
+    currentTimeRef.current = 0
+    setCurrentTime(0)
+    setPendingImport(null)
+  }
+
+  /** Point the editor's resolution widgets at the sizing the imported file asked for. */
+  function applyImportedResolution(plan: MarkdownImportPlan) {
+    const { megapixels, aspectRatio } = plan.settings
+    if (megapixels === undefined && aspectRatio === undefined) return
+    type EditableWidget = { name?: string; value?: unknown; callback?: (value: unknown) => void }
+    const widgets = (node as { widgets?: EditableWidget[] } | null)?.widgets ?? []
+    const byName = new Map(widgets.map((widget) => [widget.name, widget]))
+    const resolution = byName.get('resolution')
+    if (resolution) {
+      const current = resolution.value
+      if (current && typeof current === 'object' && !Array.isArray(current)) {
+        const next = { ...(current as Record<string, unknown>) }
+        next.resolution = MEGAPIXEL_RESOLUTION_LABEL
+        if (aspectRatio) next.aspect_ratio = aspectRatio
+        if (megapixels !== undefined) next.megapixels = megapixels
+        resolution.value = next
+        resolution.callback?.(next)
+      } else {
+        resolution.value = MEGAPIXEL_RESOLUTION_LABEL
+        resolution.callback?.(MEGAPIXEL_RESOLUTION_LABEL)
+      }
+    }
+    const aspectWidget = byName.get('resolution.aspect_ratio')
+    if (aspectWidget && aspectRatio) {
+      aspectWidget.value = aspectRatio
+      aspectWidget.callback?.(aspectRatio)
+    }
+    const megapixelWidget = byName.get('resolution.megapixels')
+    if (megapixelWidget && megapixels !== undefined) {
+      megapixelWidget.value = megapixels
+      megapixelWidget.callback?.(megapixels)
+    }
+    const graph = (app as { graph?: { setDirtyCanvas?: (foreground: boolean, background: boolean) => void } } | undefined)?.graph
+    graph?.setDirtyCanvas?.(true, true)
   }
 
   function setSingleSelectedSegment(segmentId: string | null) {
@@ -1405,8 +1489,58 @@ export function MultiTrackWidget({ value, onChange, app, node }: Readonly<ReactW
             onTrackSegmentsContentChange={handleTrackSegmentsContentChange}
             onTaskTrackSegmentsChange={handleTaskTrackSegmentsChange}
             onSelectedSegmentDurationChange={handleSelectedSegmentDurationChange}
+            onImportMarkdown={() => importInputRef.current?.click()}
             onGenerateSubtitleSpeech={handleGenerateSubtitleSpeech}
           />
+          <input
+            ref={importInputRef}
+            type="file"
+            accept=".md,.markdown,.txt,text/markdown,text/plain"
+            className="hidden"
+            onChange={handleImportMarkdownInputChange}
+          />
+          <Dialog open={pendingImport !== null} onOpenChange={(open) => { if (!open) setPendingImport(null) }}>
+            <DialogContent className="max-w-md">
+              <DialogHeader>
+                <DialogTitle>{t('multitrack.importMarkdownTitle')}</DialogTitle>
+                <DialogDescription>
+                  {t('multitrack.importMarkdownProjectHint', {
+                    file: pendingImport?.fileName ?? '',
+                    summary: pendingImport ? describeImportPlan(pendingImport.plan) : '',
+                  })}
+                </DialogDescription>
+              </DialogHeader>
+              {pendingImport
+                && pendingImport.plan.warnings.length + pendingImport.plan.settings.notes.length > 0 && (
+                <ul className="max-h-40 list-disc space-y-1 overflow-auto pl-4 text-[11px] text-muted-foreground">
+                  {[...pendingImport.plan.warnings, ...pendingImport.plan.settings.notes]
+                    .slice(0, 10)
+                    .map((warning) => <li key={warning}>{warning}</li>)}
+                </ul>
+              )}
+              <DialogFooter>
+                <Button type="button" variant="outline" onClick={() => setPendingImport(null)}>
+                  {t('common.cancel')}
+                </Button>
+                <Button type="button" onClick={applyImportedProject}>
+                  {t('multitrack.importMarkdownConfirm')}
+                </Button>
+              </DialogFooter>
+            </DialogContent>
+          </Dialog>
+          <Dialog open={importNotice !== null} onOpenChange={(open) => { if (!open) setImportNotice(null) }}>
+            <DialogContent className="max-w-md">
+              <DialogHeader>
+                <DialogTitle>{t('multitrack.importMarkdownFailedTitle')}</DialogTitle>
+                <DialogDescription>{importNotice}</DialogDescription>
+              </DialogHeader>
+              <DialogFooter>
+                <Button type="button" onClick={() => setImportNotice(null)}>
+                  {t('common.cancel')}
+                </Button>
+              </DialogFooter>
+            </DialogContent>
+          </Dialog>
           <MultiTrackToolbar
             currentTime={currentTime}
             totalLength={data.total_length}

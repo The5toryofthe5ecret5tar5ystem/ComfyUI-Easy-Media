@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react'
-import { Gauge, Volume2, VolumeX } from 'lucide-react'
+import { FileUp, Gauge, Volume2, VolumeX } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { NumberInput } from '@/components/ui/number-input'
@@ -25,6 +25,8 @@ interface PreviewFloatingToolbarProps {
   selectedMediaMuted: boolean
   selectedMediaDuration: number | null
   rightInset?: number | string
+  /** Present when the editor can build a whole project from a markdown file. */
+  onImportMarkdown?: () => void
   onGlobalSettingsChange: (patch: Partial<Pick<TrackData, 'muted' | 'volume_db' | 'frame_rate'>>) => void
   onSelectedSegmentContentChange: (patch: Partial<MultiTrackSegmentContent>) => void
   onSelectedSegmentDurationChange: (duration: number) => void
@@ -49,6 +51,7 @@ export function PreviewFloatingToolbar({
   selectedMediaMuted,
   selectedMediaDuration,
   rightInset = 12,
+  onImportMarkdown,
   onGlobalSettingsChange,
   onSelectedSegmentContentChange,
   onSelectedSegmentDurationChange,
@@ -106,8 +109,21 @@ export function PreviewFloatingToolbar({
     <div
       className="absolute top-1/2 z-20 flex -translate-y-1/2 flex-col overflow-hidden rounded-lg border border-border bg-popover/90 text-popover-foreground shadow-lg backdrop-blur"
       style={{ right: rightInset }}
-    >
-      <Popover>
+    >      {onImportMarkdown && (
+        <>
+          <Button
+            type="button"
+            variant="ghost"
+            className="flex h-12 w-10 flex-col gap-1 rounded-none px-1 py-1 cursor-pointer"
+            aria-label={t('multitrack.importMarkdown')}
+            onClick={onImportMarkdown}
+          >
+            <FileUp className="h-4 w-4" />
+            <span className="text-[8px]">{t('multitrack.importMarkdownShort')}</span>
+          </Button>
+          <div className="mx-3 h-px bg-border" />
+        </>
+      )}      <Popover>
         <PopoverTrigger asChild>
           <Button
             type="button"

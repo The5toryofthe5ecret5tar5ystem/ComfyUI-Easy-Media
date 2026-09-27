@@ -78,6 +78,8 @@ interface PreviewAreaProps {
   onTrackSegmentsContentChange?: (updates: Array<{ segmentId: string; patch: Partial<MultiTrackSegmentContent> }>) => void
   onTaskTrackSegmentsChange?: (segments: MultiTrackSegment[]) => void
   onSelectedSegmentDurationChange: (duration: number) => void
+  /** Builds a whole project from a long-take markdown file. */
+  onImportMarkdown?: () => void
   onGenerateSubtitleSpeech?: (
     segment: MultiTrackSegment,
     settings: SubtitleSpeechSettings,
@@ -250,6 +252,7 @@ export function PreviewArea({
   onTrackSegmentsContentChange,
   onTaskTrackSegmentsChange,
   onSelectedSegmentDurationChange,
+  onImportMarkdown,
   onGenerateSubtitleSpeech,
 }: Readonly<PreviewAreaProps>) {
   const t = useT()
@@ -1492,6 +1495,7 @@ export function PreviewArea({
         rightInset={selectedSubtitleStyle
           ? SUBTITLE_SETTINGS_PANEL_TOOLBAR_INSET
           : 12}
+        onImportMarkdown={onImportMarkdown}
         onGlobalSettingsChange={onGlobalSettingsChange}
         onSelectedSegmentContentChange={onSelectedSegmentContentChange}
         onSelectedSegmentDurationChange={onSelectedSegmentDurationChange}
