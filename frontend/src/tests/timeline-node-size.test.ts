@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest'
-import { adjustMultiTrackEditorNodeHeight, preserveTimelineEditorNodeHeight } from '@/lib/timeline-node-size'
+import { adjustMultiTrackEditorNodeHeight, holdMultiTrackEditorNodeHeight, preserveTimelineEditorNodeHeight } from '@/lib/timeline-node-size'
 import { scaleImageItemsToDuration } from '@/lib/timeline-utils'
 import type { ImageItem } from '@/types/timeline'
 
@@ -88,6 +88,34 @@ describe('preserveTimelineEditorNodeHeight', () => {
 
     expect(node.size).toEqual([800, 764])
     expect(node.properties.easyMediaTimelineHeight).toBe(764)
+    vi.useRealTimers()
+  })
+
+  it('holds the on-screen height when a late widget re-measure tries to shrink the node', () => {
+    vi.useFakeTimers()
+    const NodeType = installTimelineHeightHooks('easy multiTrackEditor')
+    const node = new NodeType() as InstanceType<typeof NodeType> & {
+      onResize?: (size: unknown) => void
+    }
+    node.size = [800, 1100]
+    node.properties.easyMediaTimelineHeight = 1100
+
+    holdMultiTrackEditorNodeHeight(node, 900)
+    // The front end finishes re-measuring the DOM widget after the data change.
+    vi.advanceTimersByTime(600)
+    node.size = [800, 700]
+    vi.advanceTimersByTime(200)
+
+    expect(node.size).toEqual([800, 1100])
+    expect(node.properties.easyMediaTimelineHeight).toBe(1100)
+
+    // The hold expires on its own and never clamps the node afterwards.
+    vi.advanceTimersByTime(4000)
+    node.size = [800, 500]
+    node.onResize?.([800, 500])
+    expect(node.properties.easyMediaTimelineHeight).toBe(500)
+    vi.runAllTimers()
+    expect(node.size).toEqual([800, 500])
     vi.useRealTimers()
   })
 

@@ -12,7 +12,7 @@ import {
   planToCombinedText,
   snapH3Frames,
 } from '@/lib/markdown-import'
-import type { MultiTrackSegment } from '@/types/multitrack'
+import type { MultiTrack, MultiTrackSegment, TrackData } from '@/types/multitrack'
 
 const EN_DASH = '\u2013'
 
@@ -365,6 +365,67 @@ describe('buildImportedProject', () => {
 
   it('switches the resolution label it expects the editor to use', () => {
     expect(MEGAPIXEL_RESOLUTION_LABEL).toBe('width x height (megapixels)')
+  })
+
+  it('keeps the tracks it does not own and the project flags', () => {
+    const plan = parseLongTakeMarkdown(guideFile([
+      { mode: 'shot', start: '00:00', end: '00:08', body: 'prompt one' },
+    ]))
+    const audioTrack: MultiTrack = {
+      id: 'audio-track',
+      name: 'Audio 0',
+      type: 'audio',
+      color: 'var(--secondary)',
+      muted: false,
+      locked: false,
+      audio_locked: true,
+      segments: [{
+        id: 'audio-segment',
+        start_frame: 0,
+        end_frame: 900,
+        color: 'var(--secondary)',
+        content: { media_type: 'audio' },
+      }],
+    }
+    const existing: TrackData = {
+      muted: true,
+      volume_db: -3,
+      task_overview: true,
+      task_markers: [{ id: 'marker', frame: 24 }],
+      frame_rate: 24,
+      total_length: 900,
+      tracks: [
+        {
+          id: 'task-track',
+          name: 'Task 0',
+          type: 'task',
+          task_mode: 'ref',
+          color: 'var(--multitrack-task-bg)',
+          muted: false,
+          locked: false,
+          segments: [taskSegment()],
+        },
+        audioTrack,
+      ],
+    }
+
+    const project = buildImportedProject(plan, { existing })
+
+    // Same track count in the same order, so importing cannot resize the editor node.
+    expect(project.tracks.map((track) => track.type)).toEqual(['task', 'audio'])
+    expect(project.tracks[1]).toBe(audioTrack)
+    expect(project.tracks[0].segments[0].content.user_prompt).toBe('prompt one')
+    expect(project.task_overview).toBe(true)
+    expect(project.muted).toBe(true)
+    expect(project.task_markers).toEqual([{ id: 'marker', frame: 24 }])
+    // The audio bed is longer than the imported video, so the project keeps its length.
+    expect(project.total_length).toBe(900)
+  })
+
+  it('prefers the project frame rate when the file does not name one', () => {
+    const plan = parseLongTakeMarkdown(['```', 'first', '```'].join('\n'), { fallbackFrameRate: 30 })
+    expect(plan.frameRate).toBe(30)
+    expect(buildImportedProject(plan, { fallbackFrameRate: 30 }).frame_rate).toBe(30)
   })
 })
 

@@ -440,11 +440,11 @@ function resolveDurations(segments: ImportedMarkdownSegment[], frameRate: number
   return total
 }
 
-export function parseLongTakeMarkdown(text: string, options: { frameRate?: number } = {}): MarkdownImportPlan {
+export function parseLongTakeMarkdown(text: string, options: { fallbackFrameRate?: number } = {}): MarkdownImportPlan {
   const settings = parseProjectSettings(text)
-  const frameRate = options.frameRate && options.frameRate > 0
-    ? options.frameRate
-    : settings.frameRate ?? MULTITRACK_DEFAULT_FRAME_RATE
+  const frameRate = settings.frameRate
+    ?? (options.fallbackFrameRate && options.fallbackFrameRate > 0 ? options.fallbackFrameRate : undefined)
+    ?? MULTITRACK_DEFAULT_FRAME_RATE
   const { segments, source, warnings } = takePrompts(text)
 
   if (segments.length > MARKDOWN_IMPORT_MAX_SEGMENTS) {
@@ -565,22 +565,32 @@ export function buildImportedTaskSegments(
 }
 
 export interface BuildImportedProjectOptions {
-  frameRate?: number
+  /** Project being imported into: its non-task tracks and flags are preserved. */
+  existing?: TrackData
+  /** Frame rate used when the file itself does not name one. */
+  fallbackFrameRate?: number
   /** Fallback segment length when neither the headings nor the setup block give one. */
   fallbackSegmentSeconds?: number
 }
 
 /**
- * Build a complete track project from an imported file: one task track whose
- * segments carry the file's prompts, generator mode, continuity and lengths.
+ * Build a complete track project from an imported file: the task track is replaced
+ * with one segment per SEGMENT section, carrying the file's prompts, generator mode,
+ * continuity and lengths.
  *
- * Everything the editor owns is replaced, so this works with an empty project.
+ * Everything the editor owns is written, so this works with an empty project, but
+ * tracks the import does not own (video, audio, subtitle) and the project flags are
+ * kept so importing never shrinks the editor around the user's media.
  */
 export function buildImportedProject(
   plan: MarkdownImportPlan,
   options: BuildImportedProjectOptions = {},
 ): TrackData {
-  const frameRate = options.frameRate ?? plan.frameRate ?? MULTITRACK_DEFAULT_FRAME_RATE
+  const existing = options.existing
+  const frameRate = options.fallbackFrameRate
+    ?? plan.settings.frameRate
+    ?? plan.frameRate
+    ?? MULTITRACK_DEFAULT_FRAME_RATE
   const { settings } = plan
   const fallbackSeconds = options.fallbackSegmentSeconds ?? settings.plannedSegmentSeconds ?? 8
   const lengths = plan.totalFrames > 0
@@ -629,13 +639,23 @@ export function buildImportedProject(
     segments,
   }
 
+  const keptTracks = existing?.tracks.filter((track) => track.type !== 'task') ?? []
+  const taskIndex = existing?.tracks.findIndex((track) => track.type === 'task') ?? -1
+  const tracks = taskIndex >= 0
+    ? [...keptTracks.slice(0, taskIndex), taskTrack, ...keptTracks.slice(taskIndex)]
+    : [...keptTracks, taskTrack]
+  const keptEnd = keptTracks.reduce(
+    (max, track) => track.segments.reduce((inner, segment) => Math.max(inner, segment.end_frame), max),
+    0,
+  )
+
   return {
-    muted: false,
-    volume_db: MULTITRACK_DEFAULT_VOLUME_DB,
-    task_markers: [],
-    task_overview: false,
-    tracks: [taskTrack],
-    total_length: cursor,
+    muted: existing?.muted ?? false,
+    volume_db: existing?.volume_db ?? MULTITRACK_DEFAULT_VOLUME_DB,
+    task_markers: existing?.task_markers ?? [],
+    task_overview: existing?.task_overview ?? false,
+    tracks,
+    total_length: Math.max(cursor, keptEnd),
     frame_rate: frameRate,
   }
 }

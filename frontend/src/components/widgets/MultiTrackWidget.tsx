@@ -92,7 +92,7 @@ import { loadBrowserAudioMetadata } from '@/lib/audio-utils'
 import { invalidateMediaListCache } from '@/stores/media-list-store'
 import { uuid } from '@/lib/uuid'
 import { loadBrowserVideoMetadata } from '@/lib/video-utils'
-import { adjustMultiTrackEditorNodeHeight } from '@/lib/timeline-node-size'
+import { adjustMultiTrackEditorNodeHeight, holdMultiTrackEditorNodeHeight } from '@/lib/timeline-node-size'
 import type { MultiTrack, MultiTrackSegment, MultiTrackSegmentContent, MultiTrackSourceType, MultiTrackTaskImage, MultiTrackType, TrackData } from '@/types/multitrack'
 import { MultiTrackRuler } from './multitrack/MultiTrackRuler'
 import { MultiTrackToolbar } from './multitrack/MultiTrackToolbar'
@@ -232,7 +232,7 @@ export function MultiTrackWidget({ value, onChange, app, node }: Readonly<ReactW
   async function handleImportMarkdownFile(file: File) {
     try {
       const text = await readFileText(file)
-      const plan = parseLongTakeMarkdown(text, { frameRate: data.frame_rate })
+      const plan = parseLongTakeMarkdown(text, { fallbackFrameRate: data.frame_rate })
       if (plan.segments.length === 0) {
         setImportNotice(t('multitrack.importMarkdownEmpty'))
         return
@@ -251,7 +251,16 @@ export function MultiTrackWidget({ value, onChange, app, node }: Readonly<ReactW
 
   function applyImportedProject() {
     if (!pendingImport) return
-    commitNormalizedTrackChange(buildImportedProject(pendingImport.plan, { frameRate: data.frame_rate }))
+    const project = buildImportedProject(pendingImport.plan, {
+      existing: data,
+      fallbackFrameRate: data.frame_rate,
+    })
+    // Importing is not a layout change: the node keeps the height it has on screen,
+    // even though the track data is replaced and the front end re-measures the widget.
+    holdMultiTrackEditorNodeHeight(node)
+    const heightDelta = getTrackLayoutHeight(project) - getTrackLayoutHeight(data)
+    commitNormalizedTrackChange(project)
+    if (heightDelta !== 0) adjustMultiTrackEditorNodeHeight(node, -heightDelta)
     applyImportedResolution(pendingImport.plan)
     currentTimeRef.current = 0
     setCurrentTime(0)

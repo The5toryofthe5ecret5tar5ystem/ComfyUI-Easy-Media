@@ -510,7 +510,7 @@ export function TaskSegmentEditor({
   async function handleMarkdownFile(file: File) {
     try {
       const text = await readFileText(file)
-      const plan = parseLongTakeMarkdown(text, { frameRate })
+      const plan = parseLongTakeMarkdown(text, { fallbackFrameRate: frameRate })
       if (plan.segments.length === 0) {
         setMarkdownImportError(t('multitrack.importMarkdownEmpty'))
         return

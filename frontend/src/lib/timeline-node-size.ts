@@ -172,4 +172,43 @@ export function preserveTimelineEditorNodeSize(nodeType: any, nodeData: { name?:
   }
 }
 
+const HEIGHT_HOLD_INTERVAL_MS = 150
+const DEFAULT_HEIGHT_HOLD_MS = 2000
+
+/**
+ * Pin a timeline editor node at its current height for a short while.
+ *
+ * Programmatic track-data changes (workflow or prompt imports) make the front end
+ * re-measure the DOM widget, and that measurement can land after the widget resize
+ * guard has expired - which silently shrinks a node the user has made taller. This
+ * holds the height that is on screen through that re-layout.
+ *
+ * It is a hold, not a limit: no minimum or maximum is imposed, the user keeps full
+ * control of the node size, and the hold expires by itself.
+ */
+export function holdMultiTrackEditorNodeHeight(node: any, holdMs = DEFAULT_HEIGHT_HOLD_MS) {
+  const currentSize = readSize(node?.size)
+  if (!currentSize || !Number.isFinite(currentSize[1]) || currentSize[1] <= 0) return
+
+  const [width, height] = currentSize
+  preserveHeight(node, height)
+  invalidatePendingHeightRestores(node)
+  const holdVersion = Number(node?.[TIMELINE_HEIGHT_RESTORE_VERSION]) || 0
+  node[TIMELINE_WIDGET_RESIZE_GUARD] = {
+    height,
+    width,
+    expiresAt: Date.now() + holdMs,
+  } satisfies ResizeGuard
+
+  const deadline = Date.now() + holdMs
+  const reapply = () => {
+    if ((Number(node?.[TIMELINE_HEIGHT_RESTORE_VERSION]) || 0) !== holdVersion) return
+    applyHeight(node, height, width)
+    if (Date.now() + HEIGHT_HOLD_INTERVAL_MS <= deadline) {
+      globalThis.setTimeout(reapply, HEIGHT_HOLD_INTERVAL_MS)
+    }
+  }
+  reapply()
+}
+
 export const preserveTimelineEditorNodeHeight = preserveTimelineEditorNodeSize
