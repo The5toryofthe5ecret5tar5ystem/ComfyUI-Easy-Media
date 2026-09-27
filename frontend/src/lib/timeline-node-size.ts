@@ -175,6 +175,34 @@ export function preserveTimelineEditorNodeSize(nodeType: any, nodeData: { name?:
 const HEIGHT_HOLD_INTERVAL_MS = 150
 const DEFAULT_HEIGHT_HOLD_MS = 2000
 
+/** Reads the current node height, whichever shape `node.size` happens to take. */
+export function readTimelineEditorNodeHeight(node: any): number | null {
+  const size = readSize(node?.size)
+  return size ? size[1] : null
+}
+
+/** True while the user is dragging the node's resize corner. */
+function isUserResizingNode(node: any): boolean {
+  const canvas = (globalThis as { app?: { canvas?: { resizing_node?: any } } }).app?.canvas
+  const resizing = canvas?.resizing_node
+  if (!resizing) return false
+  return resizing === node || resizing.node === node || resizing.id === node?.id
+}
+
+/**
+ * Re-apply a height right now, synchronously, and remember it as the intended height.
+ *
+ * Used straight after a programmatic change that makes ComfyUI's front end snap the node
+ * height to its computed content size: doing it in the same task means the intermediate
+ * size is never painted, so the node does not appear to resize at all.
+ */
+export function pinTimelineEditorNodeHeight(node: any, height: number) {
+  const currentSize = readSize(node?.size)
+  if (!currentSize || !Number.isFinite(height) || height <= 0) return
+  preserveHeight(node, height)
+  applyHeight(node, height, currentSize[0])
+}
+
 /**
  * Pin a timeline editor node at its current height for a short while.
  *
@@ -186,16 +214,19 @@ const DEFAULT_HEIGHT_HOLD_MS = 2000
  * It is a hold, not a limit: no minimum or maximum is imposed, the user keeps full
  * control of the node size, and the hold expires by itself.
  */
-export function holdMultiTrackEditorNodeHeight(node: any, holdMs = DEFAULT_HEIGHT_HOLD_MS) {
+export function holdMultiTrackEditorNodeHeight(node: any, holdMs = DEFAULT_HEIGHT_HOLD_MS, height?: number) {
   const currentSize = readSize(node?.size)
-  if (!currentSize || !Number.isFinite(currentSize[1]) || currentSize[1] <= 0) return
+  if (!currentSize) return
+  const targetHeight =
+    typeof height === 'number' && Number.isFinite(height) ? height : currentSize[1]
+  if (!Number.isFinite(targetHeight) || targetHeight <= 0) return
 
-  const [width, height] = currentSize
-  preserveHeight(node, height)
+  const width = currentSize[0]
+  preserveHeight(node, targetHeight)
   invalidatePendingHeightRestores(node)
   const holdVersion = Number(node?.[TIMELINE_HEIGHT_RESTORE_VERSION]) || 0
   node[TIMELINE_WIDGET_RESIZE_GUARD] = {
-    height,
+    height: targetHeight,
     width,
     expiresAt: Date.now() + holdMs,
   } satisfies ResizeGuard
@@ -203,7 +234,9 @@ export function holdMultiTrackEditorNodeHeight(node: any, holdMs = DEFAULT_HEIGH
   const deadline = Date.now() + holdMs
   const reapply = () => {
     if ((Number(node?.[TIMELINE_HEIGHT_RESTORE_VERSION]) || 0) !== holdVersion) return
-    applyHeight(node, height, width)
+    // Never fight the user: a corner drag is a deliberate resize.
+    if (isUserResizingNode(node)) return
+    applyHeight(node, targetHeight, width)
     if (Date.now() + HEIGHT_HOLD_INTERVAL_MS <= deadline) {
       globalThis.setTimeout(reapply, HEIGHT_HOLD_INTERVAL_MS)
     }

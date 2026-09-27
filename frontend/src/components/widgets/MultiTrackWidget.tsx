@@ -92,7 +92,13 @@ import { loadBrowserAudioMetadata } from '@/lib/audio-utils'
 import { invalidateMediaListCache } from '@/stores/media-list-store'
 import { uuid } from '@/lib/uuid'
 import { loadBrowserVideoMetadata } from '@/lib/video-utils'
-import { adjustMultiTrackEditorNodeHeight, holdMultiTrackEditorNodeHeight } from '@/lib/timeline-node-size'
+import {
+  adjustMultiTrackEditorNodeHeight,
+  holdMultiTrackEditorNodeHeight,
+  pinTimelineEditorNodeHeight,
+  readTimelineEditorNodeHeight,
+} from '@/lib/timeline-node-size'
+import { markTimelineSizeDebug, startTimelineSizeDebug } from '@/lib/timeline-size-debug'
 import type { MultiTrack, MultiTrackSegment, MultiTrackSegmentContent, MultiTrackSourceType, MultiTrackTaskImage, MultiTrackType, TrackData } from '@/types/multitrack'
 import { MultiTrackRuler } from './multitrack/MultiTrackRuler'
 import { MultiTrackToolbar } from './multitrack/MultiTrackToolbar'
@@ -230,6 +236,7 @@ export function MultiTrackWidget({ value, onChange, app, node }: Readonly<ReactW
   }
 
   async function handleImportMarkdownFile(file: File) {
+    markTimelineSizeDebug('import:file', 1000)
     try {
       const text = await readFileText(file)
       const plan = parseLongTakeMarkdown(text, { fallbackFrameRate: data.frame_rate })
@@ -257,14 +264,34 @@ export function MultiTrackWidget({ value, onChange, app, node }: Readonly<ReactW
     })
     // Importing is not a layout change: the node keeps the height it has on screen,
     // even though the track data is replaced and the front end re-measures the widget.
+    const heightBefore = readTimelineEditorNodeHeight(node)
+    markTimelineSizeDebug('import:start', 6000)
     holdMultiTrackEditorNodeHeight(node)
     const heightDelta = getTrackLayoutHeight(project) - getTrackLayoutHeight(data)
     commitNormalizedTrackChange(project)
     if (heightDelta !== 0) adjustMultiTrackEditorNodeHeight(node, -heightDelta)
     applyImportedResolution(pendingImport.plan)
+    // ComfyUI's dynamic combo (the `resolution` widget) snaps the node height to its computed
+    // content size when its callback runs, by assigning `node.size` directly. Re-applying the
+    // height in this same task means the intermediate size is never painted.
+    if (heightBefore !== null) pinTimelineEditorNodeHeight(node, heightBefore)
+    holdMultiTrackEditorNodeHeight(node)
+    markTimelineSizeDebug('import:end', 6000)
     currentTimeRef.current = 0
     setCurrentTime(0)
     setPendingImport(null)
+  }
+
+  /**
+   * ComfyUI dynamic combos own sub-widgets named `<widget>.<key>`, and fire a callback that
+   * resizes the node to fit its computed content height. Writing the value without invoking
+   * that callback keeps the import from resizing the node, while the front end still records
+   * the new value in its widget store.
+   */
+  function isDynamicComboWidget(widgets: { name?: string }[], name: string | undefined): boolean {
+    if (!name) return false
+    const prefix = `${name}.`
+    return widgets.some((widget) => typeof widget.name === 'string' && widget.name.startsWith(prefix))
   }
 
   /** Point the editor's resolution widgets at the sizing the imported file asked for. */
@@ -272,8 +299,16 @@ export function MultiTrackWidget({ value, onChange, app, node }: Readonly<ReactW
     const { megapixels, aspectRatio } = plan.settings
     if (megapixels === undefined && aspectRatio === undefined) return
     type EditableWidget = { name?: string; value?: unknown; callback?: (value: unknown) => void }
-    const widgets = (node as { widgets?: EditableWidget[] } | null)?.widgets ?? []
+    const readWidgets = (): EditableWidget[] =>
+      ((node as { widgets?: EditableWidget[] } | null)?.widgets ?? []) as EditableWidget[]
+    const widgets = readWidgets()
     const byName = new Map(widgets.map((widget) => [widget.name, widget]))
+    const notify = (widget: EditableWidget | undefined) => {
+      if (!widget) return
+      if (isDynamicComboWidget(readWidgets(), widget.name)) return
+      widget.callback?.(widget.value)
+    }
+
     const resolution = byName.get('resolution')
     if (resolution) {
       const current = resolution.value
@@ -283,21 +318,24 @@ export function MultiTrackWidget({ value, onChange, app, node }: Readonly<ReactW
         if (aspectRatio) next.aspect_ratio = aspectRatio
         if (megapixels !== undefined) next.megapixels = megapixels
         resolution.value = next
-        resolution.callback?.(next)
+        notify(resolution)
       } else {
         resolution.value = MEGAPIXEL_RESOLUTION_LABEL
-        resolution.callback?.(MEGAPIXEL_RESOLUTION_LABEL)
+        notify(resolution)
       }
     }
-    const aspectWidget = byName.get('resolution.aspect_ratio')
+
+    // Re-read the widget list afterwards: a dynamic combo rebuilds its sub-widgets on change.
+    const live = new Map(readWidgets().map((widget) => [widget.name, widget]))
+    const aspectWidget = live.get('resolution.aspect_ratio')
     if (aspectWidget && aspectRatio) {
       aspectWidget.value = aspectRatio
-      aspectWidget.callback?.(aspectRatio)
+      notify(aspectWidget)
     }
-    const megapixelWidget = byName.get('resolution.megapixels')
+    const megapixelWidget = live.get('resolution.megapixels')
     if (megapixelWidget && megapixels !== undefined) {
       megapixelWidget.value = megapixels
-      megapixelWidget.callback?.(megapixels)
+      notify(megapixelWidget)
     }
     const graph = (app as { graph?: { setDirtyCanvas?: (foreground: boolean, background: boolean) => void } } | undefined)?.graph
     graph?.setDirtyCanvas?.(true, true)
@@ -423,6 +461,9 @@ export function MultiTrackWidget({ value, onChange, app, node }: Readonly<ReactW
   useEffect(() => {
     currentTimeRef.current = currentTime
   }, [currentTime])
+
+  // Opt-in diagnostics: `localStorage.setItem('easyMedia.sizeDebug', '1')` then reload.
+  useEffect(() => startTimelineSizeDebug(node, 'track'), [node])
 
   useEffect(() => {
     if (!selectedSegmentId || selectedSegmentIds.size !== 1) return

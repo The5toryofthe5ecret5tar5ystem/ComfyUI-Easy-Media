@@ -1,5 +1,11 @@
 import { describe, expect, it, vi } from 'vitest'
-import { adjustMultiTrackEditorNodeHeight, holdMultiTrackEditorNodeHeight, preserveTimelineEditorNodeHeight } from '@/lib/timeline-node-size'
+import {
+  adjustMultiTrackEditorNodeHeight,
+  holdMultiTrackEditorNodeHeight,
+  pinTimelineEditorNodeHeight,
+  preserveTimelineEditorNodeHeight,
+  readTimelineEditorNodeHeight,
+} from '@/lib/timeline-node-size'
 import { scaleImageItemsToDuration } from '@/lib/timeline-utils'
 import type { ImageItem } from '@/types/timeline'
 
@@ -194,5 +200,69 @@ describe('scaleImageItemsToDuration', () => {
       expect.objectContaining({ file_name: 'a.png', start_frame: 0, end_frame: 60 }),
       expect.objectContaining({ file_name: 'b.png', start_frame: 61, end_frame: 120 }),
     ])
+  })
+})
+
+describe('pinTimelineEditorNodeHeight', () => {
+  /** The live front end exposes `node.size` as an array-like object, not an Array. */
+  function arrayLikeSize(width: number, height: number) {
+    return { 0: width, 1: height } as unknown as [number, number]
+  }
+
+  function createNode(height: number) {
+    return {
+      size: arrayLikeSize(792.0731915334832, height),
+      properties: {} as Record<string, unknown>,
+      setSize: vi.fn(function (this: { size: unknown }, size: unknown) {
+        this.size = size
+      }),
+      setDirtyCanvas: vi.fn(),
+    }
+  }
+
+  it('reads the array-like size the front end actually uses', () => {
+    const node = createNode(714.0284202571102)
+    expect(readTimelineEditorNodeHeight(node)).toBe(714.0284202571102)
+  })
+
+  it('restores the height synchronously after a dynamic combo snaps the node', () => {
+    const node = createNode(714.0284202571102)
+
+    // ComfyUI's dynamic combo does `node.size = [width, computeSize()[1]]` directly.
+    node.size = arrayLikeSize(792.0731915334832, 514)
+    pinTimelineEditorNodeHeight(node, 714.0284202571102)
+
+    expect(readTimelineEditorNodeHeight(node)).toBe(714.0284202571102)
+    expect(node.properties.easyMediaTimelineHeight).toBe(714.0284202571102)
+  })
+
+  it('applies an explicit height immediately when holding', () => {
+    vi.useFakeTimers()
+    const node = createNode(714.0284202571102)
+
+    node.size = arrayLikeSize(792.0731915334832, 514)
+    holdMultiTrackEditorNodeHeight(node, 900, 714.0284202571102)
+
+    expect(readTimelineEditorNodeHeight(node)).toBe(714.0284202571102)
+    vi.runAllTimers()
+    vi.useRealTimers()
+  })
+
+  it('stands down while the user is dragging the resize corner', () => {
+    vi.useFakeTimers()
+    const node = createNode(714.0284202571102)
+    const globals = globalThis as unknown as { app?: { canvas?: { resizing_node?: unknown } } }
+    globals.app = { canvas: { resizing_node: node } }
+
+    holdMultiTrackEditorNodeHeight(node, 900, 714.0284202571102)
+    // A deliberate user resize must not be reverted by the hold.
+    node.size = arrayLikeSize(792.0731915334832, 300)
+    vi.advanceTimersByTime(300)
+
+    expect(readTimelineEditorNodeHeight(node)).toBe(300)
+
+    vi.runAllTimers()
+    vi.useRealTimers()
+    delete globals.app
   })
 })
